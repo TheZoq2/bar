@@ -18,6 +18,9 @@
 #include <X11/Xft/Xft.h>
 #include <X11/Xlib-xcb.h>
 
+#include <cairo/cairo.h>
+#include <cairo/cairo-xcb.h>
+
 // Here bet  dragons
 
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -41,6 +44,9 @@ typedef struct monitor_t {
     int x, y, width;
     xcb_window_t window;
     xcb_pixmap_t pixmap;
+    xcb_pixmap_t cairo_render_pixmap;
+    cairo_t *cr;
+    cairo_surface_t *surface;
     struct monitor_t *prev, *next;
 } monitor_t;
 
@@ -113,8 +119,21 @@ static rgba_t fgc, bgc, ugc;
 static rgba_t dfgc, dbgc;
 static area_stack_t astack;
 
+static xcb_visualtype_t *vt;
+
 static XftColor sel_fg;
 static XftDraw *xft_draw;
+
+//Image stuff
+#define MAX_CACHED_IMGS 20
+#define MAX_IMG_FILENAME 128
+
+typedef struct image_t{
+    char filename[MAX_IMG_FILENAME];
+    cairo_surface_t *data;
+}image_t;
+
+static image_t imgs[MAX_CACHED_IMGS];
 
 //char width lookuptable
 #define MAX_WIDTHS (1 << 16)
@@ -244,6 +263,95 @@ int xft_char_width (uint16_t ch, font_t *cur_font)
         return 0;
 }
 
+int doesFileExist(const char* filename)
+{
+    struct stat st;
+    int result = stat(filename, &st);
+    return result == 0;
+}
+cairo_surface_t*
+load_image(char* filename)
+{
+    //make sure the file exists
+    if(!doesFileExist(filename))
+    {
+        fprintf(stderr, "Failed to load image %s, file does not exist", filename);
+        return NULL;
+    }
+
+    //Searching through the cache for the image
+    int i;
+    for(i = 0; i < MAX_CACHED_IMGS; i++)
+    {
+        //If this cache slot has not been used up
+        if(imgs[i].filename[0] == '\0')
+        {
+            break;
+        }
+        if(!strncmp(imgs[i].filename, filename, MAX_IMG_FILENAME))
+        {
+            //The image was in cache, return it
+            return imgs[i].data;
+        }
+    }
+
+    //If the image was not found in cache and the cache is full, remove the first image in cache
+    if(i >= MAX_CACHED_IMGS)
+    {
+        i = 0;
+        cairo_surface_destroy(imgs[i].data);
+    }
+
+    //Load the image into the cache
+    strncpy(imgs[i].filename, filename, MAX_IMG_FILENAME);
+    imgs[i].data = cairo_image_surface_create_from_png(filename);
+    
+
+    return imgs[i].data;
+}
+
+int draw_image(monitor_t *mon, int x, int align, char* filename)
+{
+    //Load the image
+    cairo_surface_t *img = load_image(filename);
+    if(img == NULL)
+    {
+        return 0;
+    }
+    int w = cairo_image_surface_get_width(img);
+    //int h = cairo_image_surface_get_height(img);
+
+    switch (align) {
+        case ALIGN_C:
+            xcb_copy_area(c, mon->pixmap, mon->pixmap, gc[GC_DRAW],
+                    mon->width / 2 - x / 2, 0,
+                    mon->width / 2 - (x + w) / 2, 0,
+                    x, bh);
+            x = mon->width / 2 - (x + w) / 2 + x;
+            break;
+        case ALIGN_R:
+            xcb_copy_area(c, mon->pixmap, mon->pixmap, gc[GC_DRAW],
+                    mon->width - x, 0,
+                    mon->width - x - w, 0,
+                    x, bh);
+            x = mon->width - w;
+            break;
+    }
+
+    fill_rect(mon->pixmap, gc[GC_CLEAR], x, 0, w, bh);
+
+    cairo_set_source_surface(mon->cr, img, x, 0);
+    cairo_mask_surface(mon->cr, img, x, 0);
+
+    //Render to the xcb surface
+    //cairo_surface_flush(mon->surface);
+
+    //Copy the content of the cairo pixmap to the real pixmap
+    //xcb_copy_area(c, mon->cairo_render_pixmap, mon->pixmap, gc[GC_CLEAR], x, 0, x, 0, w, h);
+
+    return w;
+}
+
 int
 draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
 {
@@ -271,6 +379,14 @@ draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
             break;
     }
     
+    /*fgc = (rgba_t){
+        .r = 255,
+        .g = 0,
+        .b = 0,
+        .a = 1
+    };
+    update_gc();*/
+
         /* Draw the background first */
     fill_rect(mon->pixmap, gc[GC_CLEAR], x, 0, ch_width, bh);
 
@@ -292,9 +408,11 @@ draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
         fill_rect(mon->pixmap, gc[GC_ATTR], x, 0, ch_width, bu);
     if (attrs & ATTR_UNDERL)
         fill_rect(mon->pixmap, gc[GC_ATTR], x, bh - bu, ch_width, bu);
-
+    
+    //draw_image(mon, x, align, "/home/frans/Downloads/Test.png");
     return ch_width;
 }
+
 
 rgba_t
 parse_color (const char *str, char **end, const rgba_t def)
@@ -369,6 +487,8 @@ parse_color (const char *str, char **end, const rgba_t def)
 
     return ret;
 }
+
+
 
 
 void
@@ -551,7 +671,11 @@ parse (char *text)
     memset(&astack, 0, sizeof(area_stack_t));
 
     for (monitor_t *m = monhead; m != NULL; m = m->next)
+    {
+        //Setting up cairo aswell
+        cairo_set_operator(m->cr, CAIRO_OPERATOR_SOURCE);
         fill_rect(m->pixmap, gc[GC_CLEAR], 0, 0, m->width, bh);
+    }
 
     /* Create xft drawable */
     if (!(xft_draw = XftDrawCreate (dpy, cur_mon->pixmap, visual_ptr , colormap))) {
@@ -629,6 +753,28 @@ parse (char *text)
                                   font_index = -1;
                               p = ep;
                               break;
+                    case 'I':
+                    {
+                            //Allocate an array to store the image path in
+                            int imgPathLen = (int)(block_end - (p));
+                            char* imgPath; 
+                            imgPath = (char*) malloc(imgPathLen);
+                            
+                            //read the image path
+                            for(int i = 0; i < imgPathLen; i++)
+                            {
+                                imgPath[i] = *(p + i);
+                            }
+
+                            //Draw the image
+                            int w = draw_image(cur_mon, pos_x, align, imgPath);
+                            pos_x += w;
+                            
+                            //Free the memory we used
+                            free(imgPath);
+
+                            break;
+                    }
 
                     // In case of error keep parsing after the closing }
                     default:
@@ -834,6 +980,16 @@ monitor_new (int x, int y, int width, int height)
 
     ret->pixmap = xcb_generate_id(c);
     xcb_create_pixmap(c, depth, ret->pixmap, ret->window, width, bh);
+
+    //Setting up cairo surface
+    ret->surface = cairo_xcb_surface_create(c, ret->pixmap, vt, width, height);
+    //ret->surface = cairo_xcb_surface_create_for_bitmap(c, scr, ret->cairo_render_pixmap, width, height);
+    if(!(cairo_surface_status != CAIRO_STATUS_SUCCESS))
+    {
+        fprintf(stderr, "Cairo surface creation failed. Check code  in monitor_new function\n");
+    }
+    //Setup cairo
+    ret->cr = cairo_create(ret->surface);
 
     return ret;
 }
@@ -1053,6 +1209,38 @@ get_xinerama_monitors (void)
     monitor_create_chain(rects, screens);
 }
 
+  xcb_visualtype_t *
+get_visual_type (void)
+{
+  xcb_depth_iterator_t iter;
+
+  iter = xcb_screen_allowed_depths_iterator(scr);
+
+  /* Try to find a RGBA visual */
+  while (iter.rem) {
+    xcb_visualtype_t *vis = xcb_depth_visuals(iter.data);
+
+    if (iter.data->depth == 32)
+      return vis;
+
+    xcb_depth_next(&iter);
+  }
+  iter = xcb_screen_allowed_depths_iterator(scr);
+
+  /* Try to find a RGBA visual */
+  while (iter.rem) {
+    xcb_visualtype_t *vis = xcb_depth_visuals(iter.data);
+
+    if (iter.data->depth == 24)
+      return vis;
+
+    xcb_depth_next(&iter);
+  }
+
+  /* Fallback to the default one */
+  return NULL;
+}
+
 xcb_visualid_t
 get_visual (void)
 {
@@ -1192,6 +1380,9 @@ xconn (void)
 	visual = get_visual();
     colormap = xcb_generate_id(c);
     xcb_create_colormap(c, XCB_COLORMAP_ALLOC_NONE, colormap, scr->root, visual);
+
+    //cairo visual type
+    vt = get_visual_type();
 }
 
 void
@@ -1317,6 +1508,10 @@ cleanup (void)
         monitor_t *next = monhead->next;
         xcb_destroy_window(c, monhead->window);
         xcb_free_pixmap(c, monhead->pixmap);
+        
+        cairo_destroy(monhead->cr);
+        cairo_surface_destroy(monhead->surface);
+
         free(monhead);
         monhead = next;
     }
@@ -1423,7 +1618,7 @@ main (int argc, char **argv)
             if (pollin[0].revents & POLLIN) { // New input, process it
                 if (fgets(input, sizeof(input), stdin) == NULL)
                     break; // EOF received
-
+                
                 parse(input);
                 redraw = true;
             }
@@ -1456,6 +1651,8 @@ main (int argc, char **argv)
 
         if (redraw) { // Copy our temporary pixmap onto the window
             for (monitor_t *mon = monhead; mon; mon = mon->next) {
+                //cairo_surface_flush(mon->surface);
+                //cairo_surface_finish(mon->surface);
                 xcb_copy_area(c, mon->pixmap, mon->window, gc[GC_DRAW], 0, 0, 0, 0, mon->width, bh);
             }
         }
