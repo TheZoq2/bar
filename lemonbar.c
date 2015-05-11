@@ -125,7 +125,7 @@ static XftColor sel_fg;
 static XftDraw *xft_draw;
 
 //Image stuff
-#define MAX_CACHED_IMGS 20
+#define MAX_CACHED_IMGS 100
 #define MAX_IMG_FILENAME 128
 
 typedef struct image_t{
@@ -298,6 +298,14 @@ load_image(char* filename)
     //If the image was not found in cache and the cache is full, remove the first image in cache
     if(i >= MAX_CACHED_IMGS)
     {
+        //cairo_surface_destroy(imgs[i].data);
+        //
+        //Move all cached images out of the way
+        for(i = MAX_CACHED_IMGS; i > 0; i--)
+        {
+            imgs[i].data = imgs[i-1].data;
+            strncpy(imgs[i].filename, imgs[i-1].filename, MAX_IMG_FILENAME);
+        }
         i = 0;
         cairo_surface_destroy(imgs[i].data);
     }
@@ -758,13 +766,14 @@ parse (char *text)
                             //Allocate an array to store the image path in
                             int imgPathLen = (int)(block_end - (p));
                             char* imgPath; 
-                            imgPath = (char*) malloc(imgPathLen);
+                            imgPath = (char*) malloc(MAX_IMG_FILENAME);
                             
                             //read the image path
                             for(int i = 0; i < imgPathLen; i++)
                             {
                                 imgPath[i] = *(p + i);
                             }
+                            imgPath[imgPathLen] = 0;
 
                             //Draw the image
                             int w = draw_image(cur_mon, pos_x, align, imgPath);
