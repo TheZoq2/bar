@@ -327,7 +327,7 @@ int draw_image(monitor_t *mon, int x, int align, char* filename)
         return 0;
     }
     int w = cairo_image_surface_get_width(img);
-    //int h = cairo_image_surface_get_height(img);
+    int h = cairo_image_surface_get_height(img);
 
     switch (align) {
         case ALIGN_C:
@@ -346,10 +346,12 @@ int draw_image(monitor_t *mon, int x, int align, char* filename)
             break;
     }
 
+    int posX = bh / 2 - h / 2;
+
     fill_rect(mon->pixmap, gc[GC_CLEAR], x, 0, w, bh);
 
-    cairo_set_source_surface(mon->cr, img, x, 0);
-    cairo_mask_surface(mon->cr, img, x, 0);
+    cairo_set_source_surface(mon->cr, img, x, posX);
+    cairo_mask_surface(mon->cr, img, x, posX);
 
     //Render to the xcb surface
     //cairo_surface_flush(mon->surface);
